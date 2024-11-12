@@ -1,0 +1,11 @@
+[package]
+name = "psql_tester"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+expectrl = "0.7"
+tempfile = "3.14"
+sha2 = "0.10"
+similar = { version = "2.6", features = ["inline"] }
+termcolor = "1.4"
