@@ -1,0 +1,49 @@
+diff --git a/src/bin/psql/copy.c b/src/bin/psql/copy.c
+index e020e4d665d..c6e66eefc7e 100644
+--- a/src/bin/psql/copy.c
++++ b/src/bin/psql/copy.c
+@@ -513,6 +513,7 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
+ 	bool		OK;
+ 	char		buf[COPYBUFSIZ];
+ 	bool		showprompt;
++	const bool	check_dot_command = (copystream == pset.cur_cmd_source);
+ 
+ 	/*
+ 	 * Establish longjmp destination for exiting from wait-for-input. (This is
+@@ -544,16 +545,9 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
+ 
+ 	OK = true;
+ 
+-	if (isbinary)
+-	{
+-		/* interactive input probably silly, but give one prompt anyway */
+-		if (showprompt)
+-		{
+-			const char *prompt = get_prompt(PROMPT_COPY, NULL);
+ 
+-			fputs(prompt, stdout);
+-			fflush(stdout);
+-		}
++	if ((isbinary || copystream != pset.cur_cmd_source) && !showprompt)
++	{
+ 
+ 		for (;;)
+ 		{
+@@ -628,7 +622,7 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
+ 					 * an EOF or not depending on the format: in TEXT mode, \.
+ 					 * will be interpreted as an EOF, in CSV, it will not.
+ 					 */
+-					if (at_line_begin && copystream == pset.cur_cmd_source)
++					if (at_line_begin && check_dot_command)
+ 					{
+ 						if ((linelen == 3 && memcmp(fgresult, "\\.\n", 3) == 0) ||
+ 							(linelen == 4 && memcmp(fgresult, "\\.\r\n", 4) == 0))
+@@ -646,7 +640,7 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
+ 						}
+ 					}
+ 
+-					if (copystream == pset.cur_cmd_source)
++					if (check_dot_command)
+ 					{
+ 						pset.lineno++;
+ 						pset.stmt_lineno++;
