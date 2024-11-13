@@ -26,10 +26,10 @@ mod tests {
     //! | script   | stdin   | binary | test_psql_script___copy_from_stdin__binary     |
     //! | terminal | tty     | text   | test_psql_terminal_copy_from_tty____text__     |
     //! | terminal | tty     | csv    | test_psql_terminal_copy_from_tty____csv___     |
-    //! | terminal | tty     | binary | test_psql_terminal_copy_from_tty____binary     | <-- TODO or invalid case?
+    //! | terminal | tty     | binary | test_psql_terminal_copy_from_tty____binary     | <-- XXX invalid case?
     //! | terminal | stdin   | text   | test_psql_terminal_copy_from_stdin__text__     |
     //! | terminal | stdin   | csv    | test_psql_terminal_copy_from_stdin__csv___     |
-    //! | terminal | stdin   | binary | test_psql_terminal_copy_from_stdin__binary     | <-- TODO or invalid case?
+    //! | terminal | stdin   | binary | test_psql_terminal_copy_from_stdin__binary     | <-- XXX invalid case?
 
     use super::*;
     use once_cell::sync::OnceCell;
@@ -371,11 +371,7 @@ mod tests {
             "Enter data to be copied followed by a newline.",
             &temp_file
         );
-        expect!(
-            &mut session,
-            "End with a backslash and a period on a line by itself, or an EOF signal.",
-            &temp_file
-        );
+        expect!(&mut session, "End with an EOF signal.", &temp_file);
         expect!(&mut session, ">>", &temp_file);
         session.send_line("1\t2")?;
         expect!(&mut session, ">>", &temp_file);
@@ -395,6 +391,106 @@ mod tests {
         expect_result_set!(output);
         let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
         expect_drop_table!(output);
+        Ok(())
+    }
+
+    #[test]
+    fn test_psql_terminal_copy_from_tty____csv___() -> Result<(), Box<dyn Error>> {
+        let test_table = Uuid::new_v4();
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        expect_create_table!(output);
+
+        let temp_file = tempfile::NamedTempFile::new()?;
+        let log_file = temp_file.as_file();
+
+        let mut session = session::log(spawn("psql")?, log_file.try_clone()?)?;
+
+        session.set_expect_timeout(Some(Duration::from_secs(1)));
+
+        let database_name =
+            std::env::var("PGDATABASE").unwrap_or_else(|_| std::env::var("USER").unwrap());
+
+        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        session.send_line(&format!(
+            r#"\copy "{}" from '/dev/tty' (format csv)"#,
+            test_table
+        ))?;
+        expect!(
+            &mut session,
+            "Enter data to be copied followed by a newline.",
+            &temp_file
+        );
+        expect!(&mut session, "End with an EOF signal.", &temp_file);
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("1,2")?;
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("3,4")?;
+        expect!(&mut session, ">>", &temp_file);
+        write!(session, "\x04")?;
+        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        session.send_line("\\q")?;
+        session.expect(Eof)?;
+
+        let output = run_cmd(
+            "psql",
+            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        )?;
+        expect_result_set!(output);
+        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        expect_drop_table!(output);
+        Ok(())
+    }
+
+    #[test]
+    fn test_psql_terminal_copy_from_tty____binary() -> Result<(), Box<dyn Error>> {
+        let test_table = Uuid::new_v4();
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        expect_create_table!(output);
+
+        let temp_file = tempfile::NamedTempFile::new()?;
+        let log_file = temp_file.as_file();
+
+        let mut session = session::log(spawn("psql")?, log_file.try_clone()?)?;
+
+        session.set_expect_timeout(Some(Duration::from_secs(1)));
+
+        let database_name =
+            std::env::var("PGDATABASE").unwrap_or_else(|_| std::env::var("USER").unwrap());
+
+        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        session.send_line(&format!(
+            r#"\copy "{}" from '/dev/tty' (format binary)"#,
+            test_table
+        ))?;
+        expect!(&mut session, "End with an EOF signal.", &temp_file);
+
+        // XXX - Sending the actual binary data is untested, but is it even possible?
+
+        // let data_content = fs::read(&env.file_path_binary)?;
+        // session.send(&data_content)?;
+        // write!(session, "\x04")?;
+        // expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        // session.send_line("\\q")?;
+        // session.expect(Eof)?;
+        // let output = run_cmd(
+        //     "psql",
+        //     &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        // )?;
+        // expect_result_set!(output);
+        // let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        // expect_drop_table!(output);
         Ok(())
     }
 
@@ -512,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn test_psql_terminal_copy_from_tty____csv___() -> Result<(), Box<dyn Error>> {
+    fn test_psql_terminal_copy_from_stdin__binary() -> Result<(), Box<dyn Error>> {
         let test_table = Uuid::new_v4();
         let output = run_cmd(
             "psql",
@@ -535,37 +631,13 @@ mod tests {
 
         expect!(&mut session, &format!("{}=#", database_name), &temp_file);
         session.send_line(&format!(
-            r#"\copy "{}" from '/dev/tty' (format csv)"#,
+            r#"\copy "{}" from stdin (format binary)"#,
             test_table
         ))?;
-        expect!(
-            &mut session,
-            "Enter data to be copied followed by a newline.",
-            &temp_file
-        );
-        expect!(
-            &mut session,
-            // FIXME: This should just say: End with an EOF signal.
-            "End with a backslash and a period on a line by itself, or an EOF signal.",
-            &temp_file
-        );
-        expect!(&mut session, ">>", &temp_file);
-        session.send_line("1,2")?;
-        expect!(&mut session, ">>", &temp_file);
-        session.send_line("3,4")?;
-        expect!(&mut session, ">>", &temp_file);
-        write!(session, "\x04")?;
-        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
-        session.send_line("\\q")?;
-        session.expect(Eof)?;
+        expect!(&mut session, "End with an EOF signal.", &temp_file);
 
-        let output = run_cmd(
-            "psql",
-            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
-        )?;
-        expect_result_set!(output);
-        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
-        expect_drop_table!(output);
+        // XXX - Sending the actual binary data is untested, but is it even possible?
+
         Ok(())
     }
 }
