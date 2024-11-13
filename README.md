@@ -21,8 +21,10 @@ This test suite verifies `psql` `\copy` command behavior across different:
 | script   | stdin   | binary | test_psql_script___copy_from_stdin__binary   |
 | terminal | tty     | text   | test_psql_terminal_copy_from_tty____text__   |
 | terminal | tty     | csv    | test_psql_terminal_copy_from_tty____csv___   |
+| terminal | tty     | binary | test_psql_terminal_copy_from_tty____binary   |
 | terminal | stdin   | text   | test_psql_terminal_copy_from_stdin__text__   |
 | terminal | stdin   | csv    | test_psql_terminal_copy_from_stdin__csv___   |
+| terminal | stdin   | binary | test_psql_terminal_copy_from_stdin__binary   |
 
 ## Prerequisites
 
@@ -44,19 +46,21 @@ cargo test
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
      Running unittests src/main.rs (target/debug/deps/psql_tester-763ec3e278ec9537)
 
-running 10 tests
-test tests::test_psql_terminal_copy_from_stdin__text__ ... ok
-test tests::test_psql_terminal_copy_from_tty____csv___ ... ok
-test tests::test_psql_terminal_copy_from_stdin__csv___ ... ok
-test tests::test_psql_terminal_copy_from_tty____text__ ... ok
+running 12 tests
 test tests::test_psql_command__copy_from_file___text__ ... ok
 test tests::test_psql_command__copy_from_file___csv___ ... ok
-test tests::test_psql_script___copy_from_stdin__binary ... ok
 test tests::test_psql_command__copy_from_file___binary ... ok
 test tests::test_psql_script___copy_from_stdin__text__ ... ok
 test tests::test_psql_script___copy_from_stdin__csv___ ... ok
+test tests::test_psql_script___copy_from_stdin__binary ... ok
+test tests::test_psql_terminal_copy_from_tty____text__ ... ok
+test tests::test_psql_terminal_copy_from_tty____csv___ ... ok
+test tests::test_psql_terminal_copy_from_tty____binary ... ok
+test tests::test_psql_terminal_copy_from_stdin__text__ ... ok
+test tests::test_psql_terminal_copy_from_stdin__csv___ ... ok
+test tests::test_psql_terminal_copy_from_stdin__binary ... ok
 
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
 ```
 
 ## License
