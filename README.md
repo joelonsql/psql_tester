@@ -13,18 +13,18 @@ This test suite verifies `psql` `\copy` command behavior across different:
 
 | Method   | Source  | Format | Test Name                                    |
 |----------|---------|--------|----------------------------------------------|
-| command  | file    | text   | test_psql_command__copy_from_file___text__   |
-| command  | file    | csv    | test_psql_command__copy_from_file___csv___   |
-| command  | file    | binary | test_psql_command__copy_from_file___binary   |
-| script   | stdin   | text   | test_psql_script___copy_from_stdin__text__   |
-| script   | stdin   | csv    | test_psql_script___copy_from_stdin__csv___   |
-| script   | stdin   | binary | test_psql_script___copy_from_stdin__binary   |
-| terminal | tty     | text   | test_psql_terminal_copy_from_tty____text__   |
-| terminal | tty     | csv    | test_psql_terminal_copy_from_tty____csv___   |
-| terminal | tty     | binary | test_psql_terminal_copy_from_tty____binary   |
-| terminal | stdin   | text   | test_psql_terminal_copy_from_stdin__text__   |
-| terminal | stdin   | csv    | test_psql_terminal_copy_from_stdin__csv___   |
-| terminal | stdin   | binary | test_psql_terminal_copy_from_stdin__binary   |
+| command  | file    | text   | command_file::text::test_psql_copy          |
+| command  | file    | csv    | command_file::csv::test_psql_copy           |
+| command  | file    | binary | command_file::binary::test_psql_copy        |
+| script   | stdin   | text   | script_stdin::text::test_psql_copy          |
+| script   | stdin   | csv    | script_stdin::csv::test_psql_copy           |
+| script   | stdin   | binary | script_stdin::binary::test_psql_copy        |
+| terminal | tty     | text   | terminal_tty::text::test_psql_copy          |
+| terminal | tty     | csv    | terminal_tty::csv::test_psql_copy           |
+| terminal | tty     | binary | terminal_tty::binary::test_psql_copy        |
+| terminal | stdin   | text   | terminal_stdin::text::test_psql_copy        |
+| terminal | stdin   | csv    | terminal_stdin::csv::test_psql_copy         |
+| terminal | stdin   | binary | terminal_stdin::binary::test_psql_copy      |
 
 ## Prerequisites
 
@@ -42,25 +42,36 @@ cargo test
 ```
 
 ```
-   Compiling psql_tester v0.1.0 (/home/foo/src/psql_tester)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.48s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
      Running unittests src/main.rs (target/debug/deps/psql_tester-763ec3e278ec9537)
 
-running 12 tests
-test tests::test_psql_command__copy_from_file___text__ ... ok
-test tests::test_psql_command__copy_from_file___csv___ ... ok
-test tests::test_psql_command__copy_from_file___binary ... ok
-test tests::test_psql_script___copy_from_stdin__text__ ... ok
-test tests::test_psql_script___copy_from_stdin__csv___ ... ok
-test tests::test_psql_script___copy_from_stdin__binary ... ok
-test tests::test_psql_terminal_copy_from_tty____text__ ... ok
-test tests::test_psql_terminal_copy_from_tty____csv___ ... ok
-test tests::test_psql_terminal_copy_from_tty____binary ... ok
-test tests::test_psql_terminal_copy_from_stdin__text__ ... ok
-test tests::test_psql_terminal_copy_from_stdin__csv___ ... ok
-test tests::test_psql_terminal_copy_from_stdin__binary ... ok
+running 0 tests
 
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/common.rs (target/debug/deps/common-9b4c1db3889d8dd4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mod.rs (target/debug/deps/integration-d7b9e68654ced786)
+
+running 12 tests
+test terminal_tty::text::test_psql_copy ... ok
+test terminal_tty::csv::test_psql_copy ... ok
+test terminal_stdin::csv::test_psql_copy ... ok
+test terminal_stdin::text::test_psql_copy ... ok
+test script_stdin::text::test_psql_copy ... ok
+test script_stdin::binary::test_psql_copy ... ok
+test command_file::binary::test_psql_copy ... ok
+test script_stdin::csv::test_psql_copy ... ok
+test command_file::csv::test_psql_copy ... ok
+test command_file::text::test_psql_copy ... ok
+test terminal_stdin::binary::test_psql_copy ... ok
+test terminal_tty::binary::test_psql_copy ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
 ```
 
 ## License
