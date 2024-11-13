@@ -381,7 +381,6 @@ mod tests {
         expect!(&mut session, ">>", &temp_file);
         session.send_line("3\t4")?;
         expect!(&mut session, ">>", &temp_file);
-        // XXX Weird, `\copy ... from /dev/tty (format text)` works with or without \., contrary to (format csv) where \. gives an error
         session.send_line("\\.")?;
         expect!(&mut session, ">>", &temp_file);
         write!(session, "\x04")?;
@@ -546,6 +545,7 @@ mod tests {
         );
         expect!(
             &mut session,
+            // FIXME: This should just say: End with an EOF signal.
             "End with a backslash and a period on a line by itself, or an EOF signal.",
             &temp_file
         );
@@ -554,9 +554,6 @@ mod tests {
         expect!(&mut session, ">>", &temp_file);
         session.send_line("3,4")?;
         expect!(&mut session, ">>", &temp_file);
-        // XXX Weird, `\copy ... from /dev/tty (format text)` works with or without \., contrary to (format csv) where \. gives an error
-        // session.send_line("\\.")?;
-        // expect!(&mut session, ">>", &temp_file);
         write!(session, "\x04")?;
         expect!(&mut session, &format!("{}=#", database_name), &temp_file);
         session.send_line("\\q")?;
