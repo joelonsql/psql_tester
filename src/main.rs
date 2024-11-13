@@ -1,119 +1,581 @@
-use expectrl::{spawn, Eof, session};
+use expectrl::{session, spawn, Eof};
+use similar::{ChangeTag, TextDiff};
+use std::borrow::Cow;
+use std::error::Error;
+use std::fs;
 use std::fs::File;
 use std::io::{self, Write};
 use std::process::{Command, Output};
-use std::fs;
-use std::error::Error;
-use std::net::TcpListener;
-use tempfile::TempDir;
-use std::path::Path;
 use std::time::Duration;
-use similar::{ChangeTag, TextDiff};
+use tempfile::TempDir;
 use termcolor::{ColorChoice, ColorSpec, StandardStream, WriteColor};
-use std::borrow::Cow;
+use uuid::Uuid;
 
-macro_rules! verify {
-    ($content:expr, $expected_str:expr) => {{
-        let content = $content;
-        let content_str = String::from_utf8_lossy(&content);
-        let expected = if $expected_str.starts_with('\n') {
-            Cow::Borrowed(&$expected_str[1..])
-        } else {
-            Cow::Borrowed($expected_str)
-        };
-        
-        if content_str != expected {
-            println!("\nUnexpected output at {}:{}", file!(), line!());
-            let diff = TextDiff::from_lines(&content_str, &expected);
-            
-            let mut stdout = StandardStream::stdout(ColorChoice::Always);
-            
-            for change in diff.iter_all_changes() {
-                let (sign, color) = match change.tag() {
-                    ChangeTag::Delete => ("-", ColorSpec::new().set_fg(Some(termcolor::Color::Red)).clone()),
-                    ChangeTag::Insert => ("+", ColorSpec::new().set_fg(Some(termcolor::Color::Green)).clone()),
-                    ChangeTag::Equal => (" ", ColorSpec::new().clone()),
-                };
-                
-                stdout.set_color(&color).unwrap();
-                write!(&mut stdout, "{}{}", sign, change).unwrap();
-                stdout.reset().unwrap();
-            }
-            return Ok(false);
-        }
-    }};
-}
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    //! Test Matrix:
+    //!
+    //! | Method   | Source  | Format | Function Name                                  |
+    //! |----------|---------|--------|------------------------------------------------|
+    //! | command  | file    | text   | test_psql_command__copy_from_file___text__     |
+    //! | command  | file    | csv    | test_psql_command__copy_from_file___csv___     |
+    //! | command  | file    | binary | test_psql_command__copy_from_file___binary     |
+    //! | script   | stdin   | text   | test_psql_script___copy_from_stdin__text__     |
+    //! | script   | stdin   | csv    | test_psql_script___copy_from_stdin__csv___     |
+    //! | script   | stdin   | binary | test_psql_script___copy_from_stdin__binary     |
+    //! | terminal | tty     | text   | test_psql_terminal_copy_from_tty____text__     |
+    //! | terminal | tty     | csv    | test_psql_terminal_copy_from_tty____csv___     |
+    //! | terminal | tty     | binary | test_psql_terminal_copy_from_tty____binary     | <-- TODO or invalid case?
+    //! | terminal | stdin   | text   | test_psql_terminal_copy_from_stdin__text__     |
+    //! | terminal | stdin   | csv    | test_psql_terminal_copy_from_stdin__csv___     |
+    //! | terminal | stdin   | binary | test_psql_terminal_copy_from_stdin__binary     | <-- TODO or invalid case?
 
-macro_rules! expect {
-    ($session:expr, $pattern:expr, $log_file:expr) => {{
-        if let Err(_) = $session.expect($pattern) {
-            // Print logs and location information
-            let logs = std::fs::read_to_string($log_file.path())?;
-            println!("Unexpected output at {}:{}", file!(), line!());
-            println!("Session logs at time of failure:\n{}", logs);
-            println!("Failed to find expected pattern: {}", $pattern);
-            return Ok(false);
-        }
-    }};
-}
+    use super::*;
+    use once_cell::sync::OnceCell;
+    use std::path::PathBuf;
 
-macro_rules! isempty {
-    ($content:expr) => {{
-        verify!($content, "\n");
-    }};
-}
+    static TEST_ENVIRONMENT: OnceCell<TestEnvironment> = OnceCell::new();
 
-macro_rules! verify_copy_two {
-    ($output:expr) => {{
-        verify!($output.stdout, r#"
-COPY 2
-"#);
-        isempty!($output.stderr);
-    }};
-}
-
-macro_rules! verify_result_set {
-    ($output:expr) => {{
-        verify!($output.stdout, r#"
- q1 | q2 
-----+----
-  1 |  2
-  3 |  4
-(2 rows)
-
-"#);
-        isempty!($output.stderr);
-    }};
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let temp_dir = TempDir::new()?.into_path();
-    let port = find_available_port()?;
-    setup_postgres(&temp_dir, &port)?;
-    prepare_test_database(&port)?;
-    generate_test_files(&temp_dir, &port)?;
-    
-    let mut all_tests_passed = true;
-    all_tests_passed &= test_case_1(&temp_dir, &port)?;
-    all_tests_passed &= test_case_2(&temp_dir, &port)?;
-    all_tests_passed &= test_case_3(&temp_dir, &port)?;
-    all_tests_passed &= test_case_4(&temp_dir, &port)?;
-    all_tests_passed &= test_case_5(&temp_dir, &port)?;
-    all_tests_passed &= test_case_6(&temp_dir, &port)?;
-
-    cleanup_postgres(&temp_dir)?;
-
-    if !all_tests_passed {
-        std::process::exit(1);
+    struct TestEnvironment {
+        temp_dir: PathBuf,
+        file_path_text: String,
+        file_path_binary: String,
+        file_path_csv: String,
     }
-    Ok(())
+
+    impl TestEnvironment {
+        fn new() -> Self {
+            let temp_dir = TempDir::new().unwrap().into_path();
+            let test_table = Uuid::new_v4();
+            let base_file = temp_dir.join(test_table.to_string());
+            let file_path_text = base_file
+                .with_extension("text")
+                .to_string_lossy()
+                .into_owned();
+            let file_path_binary = base_file
+                .with_extension("binary")
+                .to_string_lossy()
+                .into_owned();
+            let file_path_csv = base_file
+                .with_extension("csv")
+                .to_string_lossy()
+                .into_owned();
+            let output = run_cmd(
+                "psql",
+                &[
+                    "-c",
+                    &format!(r#"CREATE TABLE "{0}" (c1 int8, c2 int8);"#, test_table),
+                ],
+            )
+            .unwrap();
+            expect_create_table!(output);
+            let output = run_cmd(
+                "psql",
+                &[
+                    "-c",
+                    &format!(
+                        r#"INSERT INTO "{0}" (c1, c2) VALUES (1, 2), (3, 4);"#,
+                        test_table
+                    ),
+                ],
+            )
+            .unwrap();
+            expect_insert_two!(output);
+            let output = run_cmd(
+                "psql",
+                &[
+                    "-c",
+                    &format!(
+                        r#"\copy "{0}" to '{1}' (format text);"#,
+                        test_table, file_path_text
+                    ),
+                ],
+            )
+            .unwrap();
+            expect_copy_two!(output);
+            let output = run_cmd(
+                "psql",
+                &[
+                    "-c",
+                    &format!(
+                        r#"\copy "{0}" to '{1}' (format binary);"#,
+                        test_table, file_path_binary
+                    ),
+                ],
+            )
+            .unwrap();
+            expect_copy_two!(output);
+            let output = run_cmd(
+                "psql",
+                &[
+                    "-c",
+                    &format!(
+                        r#"\copy "{0}" to '{1}' (format csv);"#,
+                        test_table, file_path_csv
+                    ),
+                ],
+            )
+            .unwrap();
+            expect_copy_two!(output);
+            let output =
+                run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)]).unwrap();
+            expect_drop_table!(output);
+            Self {
+                temp_dir,
+                file_path_text,
+                file_path_binary,
+                file_path_csv,
+            }
+        }
+
+        fn cleanup(&self) {
+            fs::remove_dir_all(&self.temp_dir).unwrap();
+        }
+    }
+
+    impl Drop for TestEnvironment {
+        fn drop(&mut self) {
+            self.cleanup();
+        }
+    }
+
+    fn get_test_environment() -> &'static TestEnvironment {
+        TEST_ENVIRONMENT.get_or_init(|| TestEnvironment::new())
+    }
+
+    #[test]
+    fn test_psql_command__copy_from_file___binary() -> Result<(), Box<dyn Error>> {
+        let env = get_test_environment();
+        let test_table = Uuid::new_v4();
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        expect_create_table!(output);
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(
+                    r#"\copy "{}" from '{}' with (format binary)"#,
+                    test_table, env.file_path_binary
+                ),
+            ],
+        )?;
+        expect_copy_two!(output);
+        let output = run_cmd(
+            "psql",
+            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        )?;
+        expect_result_set!(output);
+        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        expect_drop_table!(output);
+        Ok(())
+    }
+
+    #[test]
+    fn test_psql_command__copy_from_file___csv___() -> Result<(), Box<dyn Error>> {
+        let env = get_test_environment();
+        let test_table = Uuid::new_v4();
+        run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(
+                    r#"\copy "{}" from '{}' (format csv)"#,
+                    test_table, env.file_path_csv
+                ),
+            ],
+        )?;
+        expect_copy_two!(output);
+        let output = run_cmd(
+            "psql",
+            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        )?;
+        expect_result_set!(output);
+        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        expect_drop_table!(output);
+        Ok(())
+    }
+
+    #[test]
+    fn test_psql_command__copy_from_file___text__() -> Result<(), Box<dyn Error>> {
+        let env = get_test_environment();
+        let test_table = Uuid::new_v4();
+        run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"\copy "{}" from '{}'"#, test_table, env.file_path_text),
+            ],
+        )?;
+        expect_copy_two!(output);
+        let output = run_cmd(
+            "psql",
+            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        )?;
+        expect_result_set!(output);
+        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        expect_drop_table!(output);
+        Ok(())
+    }
+
+    #[test]
+    fn test_psql_script___copy_from_stdin__binary() -> Result<(), Box<dyn Error>> {
+        let env = get_test_environment();
+        let test_table = Uuid::new_v4();
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        expect_create_table!(output);
+        let test_file_path = env.temp_dir.join(format!("{}", test_table));
+        let mut test_file = File::create(&test_file_path)?;
+        writeln!(
+            test_file,
+            r#"\copy "{}" from stdin with (format binary)"#,
+            test_table
+        )?;
+        let data_content = fs::read(&env.file_path_binary)?;
+        test_file.write_all(&data_content)?;
+        let output = run_cmd(
+            "psql",
+            &["-f", &test_file_path.to_string_lossy().into_owned()],
+        )?;
+        expect_copy_two!(output);
+        let output = run_cmd(
+            "psql",
+            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        )?;
+        expect_result_set!(output);
+        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        expect_drop_table!(output);
+        Ok(())
+    }
+
+    #[test]
+    fn test_psql_script___copy_from_stdin__csv___() -> Result<(), Box<dyn Error>> {
+        let env = get_test_environment();
+        let test_table = Uuid::new_v4();
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        expect_create_table!(output);
+        let test_file_path = env.temp_dir.join(format!("{}", test_table));
+        let mut test_file = File::create(&test_file_path)?;
+        writeln!(
+            test_file,
+            r#"\copy "{}" from stdin (format csv)"#,
+            test_table
+        )?;
+        let data_content = fs::read_to_string(&env.file_path_csv)?;
+        write!(test_file, "{}", data_content)?;
+        let output = run_cmd(
+            "psql",
+            &["-f", &test_file_path.to_string_lossy().into_owned()],
+        )?;
+        expect_copy_two!(output);
+        let output = run_cmd(
+            "psql",
+            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        )?;
+        expect_result_set!(output);
+        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        expect_drop_table!(output);
+        Ok(())
+    }
+
+    #[test]
+    fn test_psql_script___copy_from_stdin__text__() -> Result<(), Box<dyn Error>> {
+        let env = get_test_environment();
+        let test_table = Uuid::new_v4();
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        expect_create_table!(output);
+        let test_file_path = env.temp_dir.join(format!("{}", test_table));
+        let mut test_file = File::create(&test_file_path)?;
+        writeln!(test_file, r#"\copy "{}" from stdin"#, test_table)?;
+        let data_content = fs::read_to_string(&env.file_path_text)?;
+        write!(test_file, "{}", data_content)?;
+        let output = run_cmd(
+            "psql",
+            &["-f", &test_file_path.to_string_lossy().into_owned()],
+        )?;
+        expect_copy_two!(output);
+        let output = run_cmd(
+            "psql",
+            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        )?;
+        expect_result_set!(output);
+        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        expect_drop_table!(output);
+        Ok(())
+    }
+
+    #[test]
+    fn test_psql_terminal_copy_from_tty____text__() -> Result<(), Box<dyn Error>> {
+        let test_table = Uuid::new_v4();
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        expect_create_table!(output);
+
+        let temp_file = tempfile::NamedTempFile::new()?;
+        let log_file = temp_file.as_file();
+
+        let mut session = session::log(spawn("psql")?, log_file.try_clone()?)?;
+
+        session.set_expect_timeout(Some(Duration::from_secs(1)));
+
+        let database_name =
+            std::env::var("PGDATABASE").unwrap_or_else(|_| std::env::var("USER").unwrap());
+
+        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        session.send_line(&format!(r#"\copy "{}" from '/dev/tty'"#, test_table))?;
+        expect!(
+            &mut session,
+            "Enter data to be copied followed by a newline.",
+            &temp_file
+        );
+        expect!(
+            &mut session,
+            "End with a backslash and a period on a line by itself, or an EOF signal.",
+            &temp_file
+        );
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("1\t2")?;
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("3\t4")?;
+        expect!(&mut session, ">>", &temp_file);
+        // XXX Weird, `\copy ... from /dev/tty (format text)` works with or without \., contrary to (format csv) where \. gives an error
+        session.send_line("\\.")?;
+        expect!(&mut session, ">>", &temp_file);
+        write!(session, "\x04")?;
+        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        session.send_line("\\q")?;
+        session.expect(Eof)?;
+
+        let output = run_cmd(
+            "psql",
+            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        )?;
+        expect_result_set!(output);
+        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        expect_drop_table!(output);
+        Ok(())
+    }
+
+    #[test]
+    fn test_psql_terminal_copy_from_stdin__text__() -> Result<(), Box<dyn Error>> {
+        let test_table = Uuid::new_v4();
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        expect_create_table!(output);
+
+        let temp_file = tempfile::NamedTempFile::new()?;
+        let log_file = temp_file.as_file();
+
+        let mut session = session::log(spawn("psql")?, log_file.try_clone()?)?;
+
+        session.set_expect_timeout(Some(Duration::from_secs(1)));
+
+        let database_name =
+            std::env::var("PGDATABASE").unwrap_or_else(|_| std::env::var("USER").unwrap());
+
+        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        session.send_line(&format!(r#"\copy "{}" from stdin"#, test_table))?;
+        expect!(
+            &mut session,
+            "Enter data to be copied followed by a newline.",
+            &temp_file
+        );
+        expect!(
+            &mut session,
+            "End with a backslash and a period on a line by itself, or an EOF signal.",
+            &temp_file
+        );
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("1\t2")?;
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("3\t4")?;
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("\\.")?;
+        expect!(&mut session, "COPY 2", &temp_file);
+        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        session.send_line("\\q")?;
+        session.expect(Eof)?;
+
+        let output = run_cmd(
+            "psql",
+            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        )?;
+        expect_result_set!(output);
+        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        expect_drop_table!(output);
+        Ok(())
+    }
+
+    #[test]
+    fn test_psql_terminal_copy_from_stdin__csv___() -> Result<(), Box<dyn Error>> {
+        let test_table = Uuid::new_v4();
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        expect_create_table!(output);
+
+        let temp_file = tempfile::NamedTempFile::new()?;
+        let log_file = temp_file.as_file();
+
+        let mut session = session::log(spawn("psql")?, log_file.try_clone()?)?;
+
+        session.set_expect_timeout(Some(Duration::from_secs(1)));
+
+        let database_name =
+            std::env::var("PGDATABASE").unwrap_or_else(|_| std::env::var("USER").unwrap());
+
+        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        session.send_line(&format!(
+            r#"\copy "{}" from stdin (format csv)"#,
+            test_table
+        ))?;
+        expect!(
+            &mut session,
+            "Enter data to be copied followed by a newline.",
+            &temp_file
+        );
+        expect!(
+            &mut session,
+            "End with a backslash and a period on a line by itself, or an EOF signal.",
+            &temp_file
+        );
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("1,2")?;
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("3,4")?;
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("\\.")?;
+        expect!(&mut session, "COPY 2", &temp_file);
+        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        session.send_line("\\q")?;
+        session.expect(Eof)?;
+
+        let output = run_cmd(
+            "psql",
+            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        )?;
+        expect_result_set!(output);
+        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        expect_drop_table!(output);
+        Ok(())
+    }
+
+    #[test]
+    fn test_psql_terminal_copy_from_tty____csv___() -> Result<(), Box<dyn Error>> {
+        let test_table = Uuid::new_v4();
+        let output = run_cmd(
+            "psql",
+            &[
+                "-c",
+                &format!(r#"CREATE TABLE "{}" (c1 int8, c2 int8);"#, test_table),
+            ],
+        )?;
+        expect_create_table!(output);
+
+        let temp_file = tempfile::NamedTempFile::new()?;
+        let log_file = temp_file.as_file();
+
+        let mut session = session::log(spawn("psql")?, log_file.try_clone()?)?;
+
+        session.set_expect_timeout(Some(Duration::from_secs(1)));
+
+        let database_name =
+            std::env::var("PGDATABASE").unwrap_or_else(|_| std::env::var("USER").unwrap());
+
+        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        session.send_line(&format!(
+            r#"\copy "{}" from '/dev/tty' (format csv)"#,
+            test_table
+        ))?;
+        expect!(
+            &mut session,
+            "Enter data to be copied followed by a newline.",
+            &temp_file
+        );
+        expect!(
+            &mut session,
+            "End with a backslash and a period on a line by itself, or an EOF signal.",
+            &temp_file
+        );
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("1,2")?;
+        expect!(&mut session, ">>", &temp_file);
+        session.send_line("3,4")?;
+        expect!(&mut session, ">>", &temp_file);
+        // XXX Weird, `\copy ... from /dev/tty (format text)` works with or without \., contrary to (format csv) where \. gives an error
+        // session.send_line("\\.")?;
+        // expect!(&mut session, ">>", &temp_file);
+        write!(session, "\x04")?;
+        expect!(&mut session, &format!("{}=#", database_name), &temp_file);
+        session.send_line("\\q")?;
+        session.expect(Eof)?;
+
+        let output = run_cmd(
+            "psql",
+            &["-c", &format!(r#"SELECT * FROM "{}";"#, test_table)],
+        )?;
+        expect_result_set!(output);
+        let output = run_cmd("psql", &["-c", &format!(r#"DROP TABLE "{}";"#, test_table)])?;
+        expect_drop_table!(output);
+        Ok(())
+    }
 }
 
 fn run_cmd(program: &str, args: &[&str]) -> io::Result<Output> {
-    let output = Command::new(program)
-        .args(args)
-        .output()?;
-    
+    let output = Command::new(program).args(args).output()?;
+
     if !output.status.success() {
         println!("Failed command: {} {}", program, args.join(" "));
         if !output.stdout.is_empty() {
@@ -123,180 +585,134 @@ fn run_cmd(program: &str, args: &[&str]) -> io::Result<Output> {
             println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
         }
     }
-    
+
     Ok(output)
 }
 
-fn find_available_port() -> io::Result<String> {
-    TcpListener::bind("127.0.0.1:0")
-        .map(|listener| listener.local_addr().unwrap().port().to_string())
+#[macro_export]
+macro_rules! verify {
+    ($content:expr, $expected_str:expr) => {{
+        let content = $content;
+        let content_str = String::from_utf8_lossy(&content);
+        let expected = if $expected_str.starts_with('\n') {
+            Cow::Borrowed(&$expected_str[1..])
+        } else {
+            Cow::Borrowed($expected_str)
+        };
+
+        if content_str != expected {
+            println!("\nUnexpected output at {}:{}", file!(), line!());
+            let diff = TextDiff::from_lines(&content_str, &expected);
+
+            let mut stdout = StandardStream::stdout(ColorChoice::Always);
+
+            for change in diff.iter_all_changes() {
+                let (sign, color) = match change.tag() {
+                    ChangeTag::Delete => (
+                        "-",
+                        ColorSpec::new().set_fg(Some(termcolor::Color::Red)).clone(),
+                    ),
+                    ChangeTag::Insert => (
+                        "+",
+                        ColorSpec::new()
+                            .set_fg(Some(termcolor::Color::Green))
+                            .clone(),
+                    ),
+                    ChangeTag::Equal => (" ", ColorSpec::new().clone()),
+                };
+
+                stdout.set_color(&color).unwrap();
+                write!(&mut stdout, "{}{}", sign, change).unwrap();
+                stdout.reset().unwrap();
+            }
+            panic!("Verification failed");
+        }
+    }};
 }
 
-fn setup_postgres(temp_dir: &Path, port: &str) -> io::Result<()> {
-    let data_dir = temp_dir.join("data");
-    fs::create_dir_all(&data_dir)?;
-    let log_file_str = temp_dir.join("psql_test.log").to_string_lossy().into_owned();
-    let data_dir_str = data_dir.to_string_lossy().into_owned();
-    run_cmd("initdb", &["-D", &data_dir_str, "--set", &format!("port={}", port)])?;
-    run_cmd("pg_ctl", &["start", "-D", &data_dir_str, "-l", &log_file_str])?;
-
-    Ok(())
+#[macro_export]
+macro_rules! expect {
+    ($session:expr, $pattern:expr, $log_file:expr) => {{
+        if let Err(_) = $session.expect($pattern) {
+            let logs = std::fs::read_to_string($log_file.path()).unwrap();
+            println!("Unexpected output at {}:{}", file!(), line!());
+            println!("Session logs at time of failure:\n{}", logs);
+            println!("Failed to find expected pattern: {}", $pattern);
+            panic!("Expectation failed");
+        }
+    }};
 }
 
-fn prepare_test_database(port: &str) -> io::Result<()> {
-    run_cmd("createdb", &["-p", port, "psql_test"])?;
-    run_cmd("psql", &["-p", port, "psql_test", "-c", "CREATE TABLE int8_tbl(q1 int8, q2 int8);"])?;
-
-    Ok(())
+#[macro_export]
+macro_rules! isempty {
+    ($content:expr) => {{
+        verify!($content, "\n");
+    }};
 }
 
-fn generate_test_files(temp_dir: &Path, port: &str) -> io::Result<()> {
-    run_cmd("psql", &["-p", port, "psql_test", "-c", "INSERT INTO int8_tbl VALUES (1,2), (3,4);"])?;
-    let data_path = temp_dir.join("int8_tbl.data").to_string_lossy().into_owned();
-    let csv_path = temp_dir.join("int8_tbl.csv").to_string_lossy().into_owned();
-    let bin_path = temp_dir.join("int8_tbl.bin").to_string_lossy().into_owned();
-    run_cmd("psql", &["-p", port, "psql_test", "-c", &format!("COPY int8_tbl TO '{}'", data_path)])?;
-    run_cmd("psql", &["-p", port, "psql_test", "-c", &format!("COPY int8_tbl TO '{}' (format csv)", csv_path)])?;
-    run_cmd("psql", &["-p", port, "psql_test", "-c", &format!("COPY int8_tbl TO '{}' (format binary)", bin_path)])?;
-    let data_stdin_path = temp_dir.join("int8_tbl_data_stdin.sql");
-    let csv_stdin_path = temp_dir.join("int8_tbl_csv_stdin.sql");
-    let binary_stdin_path = temp_dir.join("int8_tbl_binary_stdin.sql");
-    let mut file = File::create(&data_stdin_path)?;
-    writeln!(file, "\\copy int8_tbl from stdin")?;
-    let data_content = fs::read_to_string(&data_path)?;
-    write!(file, "{}", data_content)?;
-    let mut file = File::create(&csv_stdin_path)?;
-    writeln!(file, "\\copy int8_tbl from stdin with (format csv)")?;
-    let csv_content = fs::read_to_string(&csv_path)?;
-    write!(file, "{}", csv_content)?;
-    let mut file = File::create(&binary_stdin_path)?;
-    writeln!(file, "\\copy int8_tbl from stdin with (format binary)")?;
-    let binary_content = fs::read(&bin_path)?;
-    file.write_all(&binary_content)?;
-
-    Ok(())
+#[macro_export]
+macro_rules! expect_copy_two {
+    ($output:expr) => {{
+        verify!(
+            $output.stdout,
+            r#"
+COPY 2
+"#
+        );
+        isempty!($output.stderr);
+    }};
 }
 
-fn test_case_1(temp_dir: &Path, port: &str) -> Result<bool, Box<dyn Error>> {
-    println!("Running Test Case 1: \\copy int8_tbl from '/path/to/file' (text format)");
-    truncate_table(port)?;
-    let data_path = temp_dir.join("int8_tbl.data").to_string_lossy().into_owned();
-    let output = run_cmd("psql", &["-p", port, "psql_test", "-c", &format!("\\copy int8_tbl from '{}'", data_path)])?;
-    verify_copy_two!(output);
-    let output = run_cmd("psql", &["-p", port, "psql_test", "-c", "SELECT * FROM int8_tbl;"])?;
-    verify_result_set!(output);
-    Ok(true)
+#[macro_export]
+macro_rules! expect_insert_two {
+    ($output:expr) => {{
+        verify!(
+            $output.stdout,
+            r#"
+INSERT 0 2
+"#
+        );
+        isempty!($output.stderr);
+    }};
 }
 
-fn test_case_2(temp_dir: &Path, port: &str) -> Result<bool, Box<dyn Error>> {
-    println!("Running Test Case 2: psql -f file.sql containing '\\copy int8_tbl from stdin'");
-    truncate_table(port)?;
-    let stdin_path = temp_dir.join("int8_tbl_data_stdin.sql").to_string_lossy().into_owned();
-    let output = run_cmd("psql", &["-p", port, "psql_test", "-f", &stdin_path])?;
-    verify_copy_two!(output);
-    let output = run_cmd("psql", &["-p", port, "psql_test", "-c", "SELECT * FROM int8_tbl;"])?;
-    verify_result_set!(output);
-    Ok(true)
+#[macro_export]
+macro_rules! expect_create_table {
+    ($output:expr) => {{
+        verify!(
+            $output.stdout,
+            r#"
+CREATE TABLE
+"#
+        );
+        isempty!($output.stderr);
+    }};
 }
 
-fn test_case_3(temp_dir: &Path, port: &str) -> Result<bool, Box<dyn Error>> {
-    println!("Running Test Case 3: \\copy int8_tbl from '/path/to/file' with (format binary)");
-    truncate_table(port)?;
-    let bin_path = temp_dir.join("int8_tbl.bin").to_string_lossy().into_owned();
-    let output = run_cmd("psql", &["-p", port, "psql_test", "-c", &format!("\\copy int8_tbl from '{}' with (format binary)", bin_path)])?;
-    verify_copy_two!(output);
-    let output = run_cmd("psql", &["-p", port, "psql_test", "-c", "SELECT * FROM int8_tbl;"])?;
-    verify_result_set!(output);
-    Ok(true)
+#[macro_export]
+macro_rules! expect_drop_table {
+    ($output:expr) => {{
+        verify!(
+            $output.stdout,
+            r#"
+DROP TABLE
+"#
+        );
+        isempty!($output.stderr);
+    }};
 }
 
-fn test_case_4(temp_dir: &Path, port: &str) -> Result<bool, Box<dyn Error>> {
-    println!("Running Test Case 4: psql -f file.sql containing '\\copy int8_tbl from stdin with (format binary)'");
-    truncate_table(port)?;
-    let bin_stdin_path = temp_dir.join("int8_tbl_binary_stdin.sql").to_string_lossy().into_owned();
-    let output = run_cmd("psql", &["-p", port, "psql_test", "-f", &bin_stdin_path])?;
-    verify_copy_two!(output);
-    let output = run_cmd("psql", &["-p", port, "psql_test", "-c", "SELECT * FROM int8_tbl;"])?;
-    verify_result_set!(output);
-    Ok(true)
-}
+#[macro_export]
+macro_rules! expect_result_set {
+    ($output:expr) => {{
+        verify!($output.stdout, r#"
+ c1 | c2 
+----+----
+  1 |  2
+  3 |  4
+(2 rows)
 
-fn test_case_5(_: &Path, port: &str) -> Result<bool, Box<dyn Error>> {
-    println!("Running Test Case 5: \\copy int8_tbl from '/dev/tty' (interactive terminal input)");
-    truncate_table(port)?;
-
-    let temp_file = tempfile::NamedTempFile::new()?;
-    let log_file = temp_file.as_file();
-    
-    let mut session = session::log(
-        spawn(format!("psql -p {} psql_test", port))?,
-        log_file.try_clone()?
-    )?;
-
-    session.set_expect_timeout(Some(Duration::from_secs(1)));
-
-    expect!(&mut session, "psql_test=#", &temp_file);
-    session.send_line("\\copy int8_tbl from '/dev/tty'")?;
-    expect!(&mut session, "Enter data to be copied followed by a newline.", &temp_file);
-    expect!(&mut session, "End with a backslash and a period on a line by itself, or an EOF signal.", &temp_file);
-    expect!(&mut session, ">>", &temp_file);
-    session.send_line("1\t2")?;
-    expect!(&mut session, ">>", &temp_file);
-    session.send_line("3\t4")?;
-    expect!(&mut session, ">>", &temp_file);
-    session.send_line("\\.")?;
-    expect!(&mut session, ">>", &temp_file);
-    write!(session, "\x04")?;
-    expect!(&mut session, "psql_test=#", &temp_file);
-    session.send_line("\\q")?;
-    session.expect(Eof)?;
-    let output = run_cmd("psql", &["-p", port, "psql_test", "-c", "SELECT * FROM int8_tbl;"])?;
-    verify_result_set!(output);
-    Ok(true)
-}
-
-fn test_case_6(_: &Path, port: &str) -> Result<bool, Box<dyn Error>> {
-    println!("Running Test Case 6: \\copy int8_tbl from stdin (interactive prompt)");
-    truncate_table(port)?;
-
-    let temp_file = tempfile::NamedTempFile::new()?;
-    let log_file = temp_file.as_file();
-    
-    let mut session = session::log(
-        spawn(format!("psql -p {} psql_test", port))?,
-        log_file.try_clone()?
-    )?;
-
-    session.set_expect_timeout(Some(Duration::from_secs(1)));
-
-    expect!(&mut session, "psql_test=#", &temp_file);
-    session.send_line("\\copy int8_tbl from stdin")?;
-    expect!(&mut session, "Enter data to be copied followed by a newline.", &temp_file);
-    expect!(&mut session, "End with a backslash and a period on a line by itself, or an EOF signal.", &temp_file);
-    expect!(&mut session, ">>", &temp_file);
-    session.send_line("1\t2")?;
-    expect!(&mut session, ">>", &temp_file);
-    session.send_line("3\t4")?;
-    expect!(&mut session, ">>", &temp_file);
-    session.send_line("\\.")?;
-    expect!(&mut session, "COPY 2", &temp_file);
-    expect!(&mut session, "psql_test=#", &temp_file);
-    session.send_line("\\q")?;
-    session.expect(Eof)?;
-    
-    let output = run_cmd("psql", &["-p", port, "psql_test", "-c", "SELECT * FROM int8_tbl;"])?;
-    verify_result_set!(output);
-    Ok(true)
-}
-
-fn truncate_table(port: &str) -> io::Result<()> {
-    run_cmd("psql", &["-p", port, "psql_test", "-c", "TRUNCATE int8_tbl;"])?;
-    Ok(())
-}
-
-fn cleanup_postgres(temp_dir: &Path) -> io::Result<()> {
-    let data_dir = temp_dir.join("data");
-    run_cmd("pg_ctl", &["stop", "-D", data_dir.to_str().unwrap(), "-m", "immediate"])?;
-    fs::remove_dir_all(temp_dir)?;
-    Ok(())
+"#);
+        isempty!($output.stderr);
+    }};
 }
